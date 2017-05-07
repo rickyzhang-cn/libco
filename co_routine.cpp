@@ -47,9 +47,10 @@ using namespace std;
 stCoRoutine_t *GetCurrCo( stCoRoutineEnv_t *env );
 struct stCoEpoll_t;
 
+
 struct stCoRoutineEnv_t
 {
-	stCoRoutine_t *pCallStack[ 128 ];
+	stCoRoutine_t *pCallStack[ 128 ]; //哈哈
 	int iCallStackSize;
 	stCoEpoll_t *pEpoll;
 

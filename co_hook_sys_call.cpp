@@ -1,4 +1,4 @@
-/*
+﻿/*
 * Tencent is pleased to support the open source community by making Libco available.
 
 * Copyright (C) 2014 THL A29 Limited, a Tencent company. All rights reserved.
@@ -47,12 +47,14 @@
 
 typedef long long ll64_t;
 
+//用于保存fd相关信息的结构体
 struct rpchook_t
 {
-	int user_flag;
+	int user_flag; //保存fd的flag信息，当flag中有O_NONBLOCK时，直接使用glibc中的实现
 	struct sockaddr_in dest; //maybe sockaddr_un;
 	int domain; //AF_LOCAL , AF_INET
 
+    //timeout信息
 	struct timeval read_timeout;
 	struct timeval write_timeout;
 };
@@ -61,6 +63,7 @@ static inline pid_t GetPid()
 	char **p = (char**)pthread_self();
 	return p ? *(pid_t*)(p + 18) : getpid();
 }
+//fd信息数组
 static rpchook_t *g_rpchook_socket_fd[ 102400 ] = { 0 };
 
 typedef int (*socket_pfn_t)(int domain, int type, int protocol);
@@ -98,6 +101,7 @@ typedef hostent* (*gethostbyname_pfn_t)(const char *name);
 typedef res_state (*__res_state_pfn_t)();
 typedef int (*__poll_pfn_t)(struct pollfd fds[], nfds_t nfds, int timeout);
 
+//使用dlsym获得glibc相应的实现
 static socket_pfn_t g_sys_socket_func 	= (socket_pfn_t)dlsym(RTLD_NEXT,"socket");
 static connect_pfn_t g_sys_connect_func = (connect_pfn_t)dlsym(RTLD_NEXT,"connect");
 static close_pfn_t g_sys_close_func 	= (close_pfn_t)dlsym(RTLD_NEXT,"close");
@@ -178,7 +182,7 @@ static inline ll64_t diff_ms(struct timeval &begin,struct timeval &end)
 }
 
 
-
+//g_rpchook_socket_fd相关
 static inline rpchook_t * get_by_fd( int fd )
 {
 	if( fd > -1 && fd < (int)sizeof(g_rpchook_socket_fd) / (int)sizeof(g_rpchook_socket_fd[0]) )
@@ -192,7 +196,7 @@ static inline rpchook_t * alloc_by_fd( int fd )
 	if( fd > -1 && fd < (int)sizeof(g_rpchook_socket_fd) / (int)sizeof(g_rpchook_socket_fd[0]) )
 	{
 		rpchook_t *lp = (rpchook_t*)calloc( 1,sizeof(rpchook_t) );
-		lp->read_timeout.tv_sec = 1;
+		lp->read_timeout.tv_sec = 1; //默认超时时间1s
 		lp->write_timeout.tv_sec = 1;
 		g_rpchook_socket_fd[ fd ] = lp;
 		return lp;
@@ -217,7 +221,8 @@ int socket(int domain, int type, int protocol)
 {
 	HOOK_SYS_FUNC( socket );
 
-	if( !co_is_enable_sys_hook() )
+	//hook未enable时使用glibc中实现
+    if( !co_is_enable_sys_hook() )
 	{
 		return g_sys_socket_func( domain,type,protocol );
 	}
@@ -227,7 +232,8 @@ int socket(int domain, int type, int protocol)
 		return fd;
 	}
 
-	rpchook_t *lp = alloc_by_fd( fd );
+	//在g_rpchook_socket_fd中记录
+    rpchook_t *lp = alloc_by_fd( fd );
 	lp->domain = domain;
 	
 	fcntl( fd, F_SETFL, g_sys_fcntl_func(fd, F_GETFL,0 ) );
@@ -237,7 +243,7 @@ int socket(int domain, int type, int protocol)
 
 int co_accept( int fd, struct sockaddr *addr, socklen_t *len )
 {
-	int cli = accept( fd,addr,len );
+	int cli = accept( fd,addr,len ); ////accept会阻塞？
 	if( cli < 0 )
 	{
 		return cli;
@@ -255,12 +261,13 @@ int connect(int fd, const struct sockaddr *address, socklen_t address_len)
 	}
 
 	//1.sys call
-	int ret = g_sys_connect_func( fd,address,address_len );
+	int ret = g_sys_connect_func( fd,address,address_len ); //这里会阻塞
 
 	rpchook_t *lp = get_by_fd( fd );
 	if( !lp ) return ret;
 
-	if( sizeof(lp->dest) >= address_len )
+	//保存dest addr
+    if( sizeof(lp->dest) >= address_len )
 	{
 		 memcpy( &(lp->dest),address,(int)address_len );
 	}
@@ -284,7 +291,7 @@ int connect(int fd, const struct sockaddr *address, socklen_t address_len)
 		pf.fd = fd;
 		pf.events = ( POLLOUT | POLLERR | POLLHUP );
 
-		pollret = poll( &pf,1,25000 );
+		pollret = poll( &pf,1,25000 ); //使用hook的poll，在epoll上注册事件，同时放弃运行
 
 		if( 1 == pollret  )
 		{
@@ -349,7 +356,7 @@ ssize_t read( int fd, void *buf, size_t nbyte )
 	pf.fd = fd;
 	pf.events = ( POLLIN | POLLERR | POLLHUP );
 
-	int pollret = poll( &pf,1,timeout );
+	int pollret = poll( &pf,1,timeout ); //放弃运行，直到可读事件发生
 
 	ssize_t readret = g_sys_read_func( fd,(char*)buf ,nbyte );
 
@@ -702,6 +709,8 @@ int fcntl(int fildes, int cmd, ...)
 	return ret;
 }
 
+
+//环境变量相关
 struct stCoSysEnv_t
 {
 	char *name;	
@@ -955,7 +964,7 @@ struct hostent *co_gethostbyname(const char *name)
 #endif
 
 
-void co_enable_hook_sys() //�⺯������������,�����ļ��ᱻ���ԣ�����
+void co_enable_hook_sys() //
 {
 	stCoRoutine_t *co = GetCurrThreadCo();
 	if( co )
