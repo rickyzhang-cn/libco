@@ -47,12 +47,12 @@ using namespace std;
 stCoRoutine_t *GetCurrCo( stCoRoutineEnv_t *env );
 struct stCoEpoll_t;
 
-
+//每个线程中可以有多个协程，每个线程都有一个协程运行环境的结构体
 struct stCoRoutineEnv_t
 {
-	stCoRoutine_t *pCallStack[ 128 ]; //哈哈
-	int iCallStackSize;
-	stCoEpoll_t *pEpoll;
+	stCoRoutine_t *pCallStack[ 128 ]; //模拟stack frame的作用，记录协程调用顺序，先进后出，栈顶永远是当前正在运行的协程
+	int iCallStackSize; //当前协程的个数
+	stCoEpoll_t *pEpoll; //IO事件处理相关的结构体
 
 	//for copy stack log lastco and nextco
 	stCoRoutine_t* pending_co;
@@ -305,14 +305,14 @@ struct stTimeoutItemLink_t;
 struct stTimeoutItem_t;
 struct stCoEpoll_t
 {
-	int iEpollFd;
+	int iEpollFd; //epoll fd
 	static const int _EPOLL_SIZE = 1024 * 10;
 
-	struct stTimeout_t *pTimeout;
+	struct stTimeout_t *pTimeout; //时间事件数组，每一项代表1ms，按时间顺序排列
 
-	struct stTimeoutItemLink_t *pstTimeoutList;
-
-	struct stTimeoutItemLink_t *pstActiveList;
+	struct stTimeoutItemLink_t *pstTimeoutList; //超时时间链表
+ 
+	struct stTimeoutItemLink_t *pstActiveList; //就绪时间链表
 
 	co_epoll_res *result; 
 
@@ -332,8 +332,8 @@ struct stTimeoutItem_t
 
 	unsigned long long ullExpireTime;
 
-	OnPreparePfn_t pfnPrepare;
-	OnProcessPfn_t pfnProcess;
+	OnPreparePfn_t pfnPrepare; //事件发生后预处理事件
+	OnProcessPfn_t pfnProcess; //事件回调函数
 
 	void *pArg; // routine 
 	bool bTimeout;
@@ -434,6 +434,7 @@ inline void TakeAllTimeout( stTimeout_t *apTimeout,unsigned long long allNow,stT
 
 
 }
+//协程初始化时的入口函数
 static int CoRoutineFunc( stCoRoutine_t *co,void * )
 {
 	if( co->pfn )
@@ -444,13 +445,13 @@ static int CoRoutineFunc( stCoRoutine_t *co,void * )
 
 	stCoRoutineEnv_t *env = co->env;
 
-	co_yield_env( env );
+	co_yield_env( env ); //放弃运行，swap
 
 	return 0;
 }
 
 
-
+//初始化stCoRoutine_t结构体
 struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAttr_t* attr,
 		pfn_co_routine_t pfn,void *arg )
 {
@@ -481,8 +482,8 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 
 
 	lp->env = env;
-	lp->pfn = pfn;
-	lp->arg = arg;
+	lp->pfn = pfn; //协程函数
+	lp->arg = arg; //函数参数
 
 	stStackMem_t* stack_mem = NULL;
 	if( at.share_stack )
@@ -499,7 +500,7 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 	lp->ctx.ss_sp = stack_mem->stack_buffer;
 	lp->ctx.ss_size = at.stack_size;
 
-	lp->cStart = 0;
+	lp->cStart = 0; //未运行标志
 	lp->cEnd = 0;
 	lp->cIsMain = 0;
 	lp->cEnableSysHook = 0;
@@ -513,7 +514,8 @@ struct stCoRoutine_t *co_create_env( stCoRoutineEnv_t * env, const stCoRoutineAt
 
 int co_create( stCoRoutine_t **ppco,const stCoRoutineAttr_t *attr,pfn_co_routine_t pfn,void *arg )
 {
-	if( !co_get_curr_thread_env() ) 
+	//线程内创建的第一个协程时需要运行co_init_curr_thread_env，创建协程运行时的环境
+    if( !co_get_curr_thread_env() ) 
 	{
 		co_init_curr_thread_env();
 	}
@@ -535,20 +537,21 @@ void co_release( stCoRoutine_t *co )
 
 void co_swap(stCoRoutine_t* curr, stCoRoutine_t* pending_co);
 
+//唤醒协程
 void co_resume( stCoRoutine_t *co )
 {
 	stCoRoutineEnv_t *env = co->env;
 	stCoRoutine_t *lpCurrRoutine = env->pCallStack[ env->iCallStackSize - 1 ];
-	if( !co->cStart )
+	//协程第一次被调度时，需要建立运行context
+    if( !co->cStart )
 	{
 		coctx_make( &co->ctx,(coctx_pfn_t)CoRoutineFunc,co,0 );
 		co->cStart = 1;
 	}
 	env->pCallStack[ env->iCallStackSize++ ] = co;
 	co_swap( lpCurrRoutine, co );
-
-
 }
+//协程放弃运行，让callstack上的前一个运行
 void co_yield_env( stCoRoutineEnv_t *env )
 {
 	
@@ -692,6 +695,7 @@ static short EpollEvent2Poll( uint32_t events )
 	return e;
 }
 
+//全局数据，记录每个线程的协程环境
 static stCoRoutineEnv_t* g_arrCoEnvPerThread[ 204800 ] = { 0 };
 void co_init_curr_thread_env()
 {
@@ -718,6 +722,7 @@ stCoRoutineEnv_t *co_get_curr_thread_env()
 	return g_arrCoEnvPerThread[ GetPid() ];
 }
 
+//IO事件回调函数，恢复该函数的运行
 void OnPollProcessEvent( stTimeoutItem_t * ap )
 {
 	stCoRoutine_t *co = (stCoRoutine_t*)ap->pArg;
@@ -735,7 +740,7 @@ void OnPollPreparePfn( stTimeoutItem_t * ap,struct epoll_event &e,stTimeoutItemL
 
 	if( !pPoll->iAllEventDetach )
 	{
-		pPoll->iAllEventDetach = 1;
+		pPoll->iAllEventDetach = 1; //状态变化
 
 		RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( pPoll );
 
@@ -756,14 +761,15 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 
 	for(;;)
 	{
-		int ret = co_epoll_wait( ctx->iEpollFd,result,stCoEpoll_t::_EPOLL_SIZE, 1 );
+		int ret = co_epoll_wait( ctx->iEpollFd,result,stCoEpoll_t::_EPOLL_SIZE, 1 ); //阻塞
 
-		stTimeoutItemLink_t *active = (ctx->pstActiveList);
-		stTimeoutItemLink_t *timeout = (ctx->pstTimeoutList);
+		stTimeoutItemLink_t *active = (ctx->pstActiveList); //就绪链表
+		stTimeoutItemLink_t *timeout = (ctx->pstTimeoutList); //超时链表
 
 		memset( timeout,0,sizeof(stTimeoutItemLink_t) );
 
-		for(int i=0;i<ret;i++)
+		//记录IO事件
+        for(int i=0;i<ret;i++)
 		{
 			stTimeoutItem_t *item = (stTimeoutItem_t*)result->events[i].data.ptr;
 			if( item->pfnPrepare )
@@ -790,7 +796,8 @@ void co_eventloop( stCoEpoll_t *ctx,pfn_co_eventloop_t pfn,void *arg )
 
 		Join<stTimeoutItem_t,stTimeoutItemLink_t>( active,timeout );
 
-		lp = active->head;
+		//处理IO事件，调用回调函数
+        lp = active->head;
 		while( lp )
 		{
 
@@ -824,7 +831,7 @@ stCoEpoll_t *AllocEpoll()
 	stCoEpoll_t *ctx = (stCoEpoll_t*)calloc( 1,sizeof(stCoEpoll_t) );
 
 	ctx->iEpollFd = co_epoll_create( stCoEpoll_t::_EPOLL_SIZE );
-	ctx->pTimeout = AllocTimeout( 60 * 1000 );
+	ctx->pTimeout = AllocTimeout( 60 * 1000 ); //60s
 	
 	ctx->pstActiveList = (stTimeoutItemLink_t*)calloc( 1,sizeof(stTimeoutItemLink_t) );
 	ctx->pstTimeoutList = (stTimeoutItemLink_t*)calloc( 1,sizeof(stTimeoutItemLink_t) );
@@ -944,9 +951,10 @@ int co_poll_inner( stCoEpoll_t *ctx,struct pollfd fds[], nfds_t nfds, int timeou
 		return -__LINE__;
 	}
 
-	co_yield_env( co_get_curr_thread_env() );
+	co_yield_env( co_get_curr_thread_env() ); //放弃运行
 
-	RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( &arg );
+	//oneshot模式
+    RemoveFromLink<stTimeoutItem_t,stTimeoutItemLink_t>( &arg );
 	for(nfds_t i = 0;i < nfds;i++)
 	{
 		int fd = fds[i].fd;
